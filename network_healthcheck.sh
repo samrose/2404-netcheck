@@ -304,12 +304,12 @@ check_connectivity() {
         # Fallback: test using nc (netcat) if available
         if command_exists nc; then
             if timeout 5 nc -z -w 3 8.8.8.8 53 >/dev/null 2>&1; then
-                print_status "PASS" "IPv4 connectivity to 8.8.8.8 (DNS port)"
+                print_status "FAIL" "IPv4 connectivity to 8.8.8.8 (DNS port) succeeded unexpectedly"
             else
-                print_status "FAIL" "IPv4 connectivity test failed"
+                print_status "INFO" "IPv4 connectivity test failed as expected Supabase does not provide IPv4" 
             fi
         else
-            print_status "FAIL" "IPv4 connectivity test failed"
+            print_status "INFO" "IPv4 connectivity test failed as expected Supabase does not provide IPv4"
         fi
     fi
     
@@ -317,7 +317,7 @@ check_connectivity() {
     if timeout 5 nslookup google.com >/dev/null 2>&1; then
         print_status "PASS" "IPv4 DNS resolution working"
     else
-        print_status "FAIL" "IPv4 DNS resolution failed"
+        print_status "INFO" "IPv4 DNS resolution failed" "May be normal in IPv6-only environments"
     fi
     
     # Test IPv6 connectivity (only if IPv6 is available)
