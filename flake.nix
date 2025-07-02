@@ -56,6 +56,7 @@
               pkgs.gnugrep
               pkgs.gnused
               pkgs.findutils
+              pkgs.curl
             ]}:$PATH"' $out/bin/network-healthcheck
           '';
           
@@ -107,6 +108,7 @@
             gnugrep
             gnused
             findutils
+            curl
           ];
           
           shellHook = ''
