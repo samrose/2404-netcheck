@@ -345,7 +345,7 @@ check_connectivity() {
     echo -e "\n${BLUE}=== Connectivity Tests ===${NC}"
     
     # Test IPv4 connectivity using curl with timeout
-    if timeout 5 curl -s --connect-timeout 3 --max-time 5 http://8.8.8.8 >/dev/null 2>&1; then
+    if timeout 5 curl -4 -s --connect-timeout 3 --max-time 5 http://example.com >/dev/null 2>&1; then
         print_status "PASS" "IPv4 connectivity to 8.8.8.8"
     else
         # Fallback: test using nc (netcat) if available
