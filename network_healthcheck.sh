@@ -3,7 +3,7 @@
 # Ubuntu 24.04 Network Health Check Script
 # Comprehensive networking health check including DHCP, NDisc, and IPv6
 
-set -euo pipefail
+set -uo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -74,30 +74,32 @@ check_systemd_networkd() {
     if sudo systemctl is-active systemd-networkd >/dev/null 2>&1; then
         print_status "PASS" "systemd-networkd is active and running"
     else
-        print_status "FAIL" "systemd-networkd is not active" "$(sudo systemctl status systemd-networkd --no-pager -l)"
+        local status_output
+        status_output=$(sudo systemctl status systemd-networkd --no-pager -l 2>/dev/null || echo "Cannot check status")
+        print_status "FAIL" "systemd-networkd is not active" "$status_output"
         return
     fi
     
     # Check for recent errors
     local recent_errors
-    recent_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "error\|fail\|could not" | wc -l)
+    recent_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "error\|fail\|could not" 2>/dev/null | tr -d '\n' || echo "0")
     
-    if [[ $recent_errors -eq 0 ]]; then
+    if [[ "$recent_errors" == "0" ]]; then
         print_status "PASS" "No recent systemd-networkd errors"
     else
         local error_details
-        error_details=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "error\|fail\|could not" | tail -3)
+        error_details=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -i "error\|fail\|could not" | tail -3 || echo "Cannot retrieve error details")
         print_status "WARN" "Found $recent_errors recent systemd-networkd errors" "$error_details"
     fi
     
     # Check for NDisc errors specifically
     local ndisc_errors
-    ndisc_errors=$(sudo journalctl -u systemd-networkd --since "24 hours ago" --no-pager | grep -i "could not set ndisc route" | wc -l)
+    ndisc_errors=$(sudo journalctl -u systemd-networkd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "could not set ndisc route" 2>/dev/null | tr -d '\n' || echo "0")
     
-    if [[ $ndisc_errors -eq 0 ]]; then
+    if [[ "$ndisc_errors" == "0" ]]; then
         print_status "PASS" "No recent NDisc route errors"
     else
-        print_status "FAIL" "Found $ndisc_errors NDisc route errors in the last 24 hours" "Consider setting ManageForeignRoutes=no in networkd.conf"
+        print_status "WARN" "Found $ndisc_errors NDisc route errors in the last 24 hours" "Consider setting ManageForeignRoutes=no in networkd.conf"
     fi
 }
 
@@ -114,10 +116,10 @@ check_systemd_resolved() {
     # Check DNS configuration
     if command_exists resolvectl; then
         local dns_servers
-        dns_servers=$(sudo resolvectl dns 2>/dev/null | grep -v "Link.*():" | wc -l)
-        if [[ $dns_servers -gt 0 ]]; then
+        dns_servers=$(sudo resolvectl dns 2>/dev/null | grep -v "Link.*():" | grep -c ":" 2>/dev/null || echo "0")
+        if [[ "$dns_servers" != "0" ]]; then
             print_status "PASS" "DNS servers are configured"
-            [[ $VERBOSE -eq 1 ]] && sudo resolvectl dns
+            [[ $VERBOSE -eq 1 ]] && sudo resolvectl dns 2>/dev/null
         else
             print_status "WARN" "No DNS servers configured"
         fi
@@ -137,7 +139,7 @@ check_network_interfaces() {
         # Check interface status with networkctl
         if command_exists networkctl; then
             local interface_state
-            interface_state=$(sudo networkctl status "$primary_interface" 2>/dev/null | grep "State:" | awk '{print $2}' || echo "unknown")
+            interface_state=$(sudo networkctl status "$primary_interface" 2>/dev/null | grep "State:" | awk '{print $2}' 2>/dev/null || echo "unknown")
             
             case $interface_state in
                 "routable"|"configured")
@@ -173,8 +175,8 @@ check_network_interfaces() {
     # Check for any failed interfaces
     if command_exists networkctl; then
         local failed_interfaces
-        failed_interfaces=$(sudo networkctl list 2>/dev/null | grep -c "failed" || echo "0")
-        if [[ $failed_interfaces -eq 0 ]]; then
+        failed_interfaces=$(sudo networkctl list 2>/dev/null | grep -c "failed" 2>/dev/null | tr -d '\n' || echo "0")
+        if [[ "$failed_interfaces" == "0" ]]; then
             print_status "PASS" "No failed network interfaces"
         else
             print_status "FAIL" "$failed_interfaces interface(s) in failed state"
@@ -192,7 +194,7 @@ check_dhcp_status() {
     if [[ -n "$primary_interface" ]]; then
         # Check for DHCP lease
         local dhcp_lease
-        dhcp_lease=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "dhcp.*address.*via" | tail -1)
+        dhcp_lease=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -i "dhcp.*address.*via" | tail -1 || echo "")
         
         if [[ -n "$dhcp_lease" ]]; then
             print_status "PASS" "DHCP lease obtained recently"
@@ -203,12 +205,12 @@ check_dhcp_status() {
         
         # Check for DHCP errors
         local dhcp_errors
-        dhcp_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "dhcp.*fail\|dhcp.*error" | wc -l)
+        dhcp_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "dhcp.*fail\|dhcp.*error" 2>/dev/null | tr -d '\n' || echo "0")
         
-        if [[ $dhcp_errors -eq 0 ]]; then
+        if [[ "$dhcp_errors" == "0" ]]; then
             print_status "PASS" "No recent DHCP errors"
         else
-            print_status "FAIL" "$dhcp_errors DHCP errors in the last hour"
+            print_status "WARN" "$dhcp_errors DHCP errors in the last hour"
         fi
     fi
     
@@ -272,9 +274,9 @@ check_ipv6_status() {
     
     # Check for Router Advertisement processing
     local ra_activity
-    ra_activity=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "router.*advertisement\|ndisc.*router" | wc -l)
+    ra_activity=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "router.*advertisement\|ndisc.*router" 2>/dev/null | tr -d '\n' || echo "0")
     
-    if [[ $ra_activity -gt 0 ]]; then
+    if [[ "$ra_activity" != "0" ]]; then
         print_status "PASS" "Router Advertisement activity detected"
     else
         print_status "INFO" "No recent Router Advertisement activity" "Normal if network doesn't provide IPv6"
@@ -374,7 +376,7 @@ check_network_configuration() {
             if sudo netplan generate >/dev/null 2>&1; then
                 print_status "PASS" "Netplan configuration is valid"
             else
-                print_status "FAIL" "Netplan configuration has errors"
+                print_status "FAIL" "Netplan configuration has errors or requires sudo privileges"
             fi
         else
             print_status "INFO" "No netplan configuration files found"
