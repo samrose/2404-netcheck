@@ -49,12 +49,69 @@ print_status() {
 run_command() {
     local cmd="$1"
     local timeout=${2:-10}
+    local needs_sudo=${3:-0}
     
+    if [[ $needs_sudo -eq 1 ]] && [[ $EUID -ne 0 ]]; then
+        # Try with sudo if needed and not running as root
+        if timeout "$timeout" sudo bash -c "$cmd" 2>/dev/null; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        # Try without sudo first
+        if timeout "$timeout" bash -c "$cmd" 2>/dev/null; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+}
+
+# Function to run command and capture output with sudo fallback
+run_command_with_sudo_fallback() {
+    local cmd="$1"
+    local timeout=${2:-10}
+    local description="$3"
+    
+    # Try without sudo first
     if timeout "$timeout" bash -c "$cmd" 2>/dev/null; then
         return 0
     else
+        # If that fails and we're not root, try with sudo
+        if [[ $EUID -ne 0 ]]; then
+            if timeout "$timeout" sudo bash -c "$cmd" 2>/dev/null; then
+                return 0
+            fi
+        fi
         return 1
     fi
+}
+
+# Function to get command output with sudo fallback
+get_command_output() {
+    local cmd="$1"
+    local timeout=${2:-10}
+    
+    # Try without sudo first
+    local output
+    output=$(timeout "$timeout" bash -c "$cmd" 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+        echo "$output"
+        return 0
+    fi
+    
+    # If that fails and we're not root, try with sudo
+    if [[ $EUID -ne 0 ]]; then
+        output=$(timeout "$timeout" sudo bash -c "$cmd" 2>/dev/null)
+        if [[ $? -eq 0 ]]; then
+            echo "$output"
+            return 0
+        fi
+    fi
+    
+    echo ""
+    return 1
 }
 
 # Function to check if command exists
@@ -71,33 +128,47 @@ get_primary_interface() {
 check_systemd_networkd() {
     echo -e "\n${BLUE}=== SystemD NetworkD Status ===${NC}"
     
-    if systemctl is-active systemd-networkd >/dev/null 2>&1; then
+    # Check if systemd-networkd is active
+    local service_status
+    service_status=$(get_command_output "systemctl is-active systemd-networkd" 5)
+    
+    if [[ "$service_status" == "active" ]]; then
         print_status "PASS" "systemd-networkd is active and running"
     else
-        print_status "FAIL" "systemd-networkd is not active" "$(systemctl status systemd-networkd --no-pager -l)"
+        local status_output
+        status_output=$(get_command_output "systemctl status systemd-networkd --no-pager -l" 10)
+        if [[ -n "$status_output" ]]; then
+            print_status "FAIL" "systemd-networkd is not active" "$status_output"
+        else
+            print_status "FAIL" "systemd-networkd is not active" "Cannot check status without sudo privileges"
+        fi
         return
     fi
     
     # Check for recent errors
-    local recent_errors
-    recent_errors=$(journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "error\|fail\|could not" | wc -l)
+    local recent_errors_output
+    recent_errors_output=$(get_command_output "journalctl -u systemd-networkd --since '1 hour ago' --no-pager | grep -i 'error\|fail\|could not' | wc -l" 10)
     
-    if [[ $recent_errors -eq 0 ]]; then
+    if [[ -n "$recent_errors_output" ]] && [[ "$recent_errors_output" == "0" ]]; then
         print_status "PASS" "No recent systemd-networkd errors"
-    else
+    elif [[ -n "$recent_errors_output" ]]; then
         local error_details
-        error_details=$(journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "error\|fail\|could not" | tail -3)
-        print_status "WARN" "Found $recent_errors recent systemd-networkd errors" "$error_details"
+        error_details=$(get_command_output "journalctl -u systemd-networkd --since '1 hour ago' --no-pager | grep -i 'error\|fail\|could not' | tail -3" 10)
+        print_status "WARN" "Found $recent_errors_output recent systemd-networkd errors" "$error_details"
+    else
+        print_status "WARN" "Cannot check systemd-networkd errors" "Requires sudo privileges for journalctl access"
     fi
     
     # Check for NDisc errors specifically
-    local ndisc_errors
-    ndisc_errors=$(journalctl -u systemd-networkd --since "24 hours ago" --no-pager | grep -i "could not set ndisc route" | wc -l)
+    local ndisc_errors_output
+    ndisc_errors_output=$(get_command_output "journalctl -u systemd-networkd --since '24 hours ago' --no-pager | grep -i 'could not set ndisc route' | wc -l" 10)
     
-    if [[ $ndisc_errors -eq 0 ]]; then
+    if [[ -n "$ndisc_errors_output" ]] && [[ "$ndisc_errors_output" == "0" ]]; then
         print_status "PASS" "No recent NDisc route errors"
+    elif [[ -n "$ndisc_errors_output" ]]; then
+        print_status "FAIL" "Found $ndisc_errors_output NDisc route errors in the last 24 hours" "Consider setting ManageForeignRoutes=no in networkd.conf"
     else
-        print_status "FAIL" "Found $ndisc_errors NDisc route errors in the last 24 hours" "Consider setting ManageForeignRoutes=no in networkd.conf"
+        print_status "INFO" "Cannot check NDisc errors" "Requires sudo privileges for journalctl access"
     fi
 }
 
@@ -105,7 +176,11 @@ check_systemd_networkd() {
 check_systemd_resolved() {
     echo -e "\n${BLUE}=== SystemD Resolved Status ===${NC}"
     
-    if systemctl is-active systemd-resolved >/dev/null 2>&1; then
+    # Check if systemd-resolved is active
+    local service_status
+    service_status=$(get_command_output "systemctl is-active systemd-resolved" 5)
+    
+    if [[ "$service_status" == "active" ]]; then
         print_status "PASS" "systemd-resolved is active and running"
     else
         print_status "WARN" "systemd-resolved is not active" "DNS resolution may not work properly"
@@ -113,11 +188,15 @@ check_systemd_resolved() {
     
     # Check DNS configuration
     if command_exists resolvectl; then
-        local dns_servers
-        dns_servers=$(resolvectl dns 2>/dev/null | grep -v "Link.*():" | wc -l)
-        if [[ $dns_servers -gt 0 ]]; then
+        local dns_servers_output
+        dns_servers_output=$(get_command_output "resolvectl dns 2>/dev/null | grep -v 'Link.*():' | wc -l" 5)
+        if [[ -n "$dns_servers_output" ]] && [[ "$dns_servers_output" != "0" ]]; then
             print_status "PASS" "DNS servers are configured"
-            [[ $VERBOSE -eq 1 ]] && resolvectl dns
+            if [[ $VERBOSE -eq 1 ]]; then
+                local dns_details
+                dns_details=$(get_command_output "resolvectl dns" 5)
+                [[ -n "$dns_details" ]] && echo "$dns_details"
+            fi
         else
             print_status "WARN" "No DNS servers configured"
         fi
@@ -136,8 +215,9 @@ check_network_interfaces() {
         
         # Check interface status with networkctl
         if command_exists networkctl; then
-            local interface_state
-            interface_state=$(networkctl status "$primary_interface" 2>/dev/null | grep "State:" | awk '{print $2}' || echo "unknown")
+            local interface_state_output
+            interface_state_output=$(get_command_output "networkctl status '$primary_interface' 2>/dev/null | grep 'State:' | awk '{print \$2}'" 10)
+            local interface_state="${interface_state_output:-unknown}"
             
             case $interface_state in
                 "routable"|"configured")
@@ -172,9 +252,11 @@ check_network_interfaces() {
     
     # Check for any failed interfaces
     if command_exists networkctl; then
-        local failed_interfaces
-        failed_interfaces=$(networkctl list 2>/dev/null | grep -c "failed" || echo "0")
-        if [[ $failed_interfaces -eq 0 ]]; then
+        local failed_interfaces_output
+        failed_interfaces_output=$(get_command_output "networkctl list 2>/dev/null | grep -c 'failed'" 10)
+        local failed_interfaces="${failed_interfaces_output:-0}"
+        
+        if [[ "$failed_interfaces" == "0" ]]; then
             print_status "PASS" "No failed network interfaces"
         else
             print_status "FAIL" "$failed_interfaces interface(s) in failed state"
@@ -191,24 +273,26 @@ check_dhcp_status() {
     
     if [[ -n "$primary_interface" ]]; then
         # Check for DHCP lease
-        local dhcp_lease
-        dhcp_lease=$(journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "dhcp.*address.*via" | tail -1)
+        local dhcp_lease_output
+        dhcp_lease_output=$(get_command_output "journalctl -u systemd-networkd --since '1 hour ago' --no-pager | grep -i 'dhcp.*address.*via' | tail -1" 10)
         
-        if [[ -n "$dhcp_lease" ]]; then
+        if [[ -n "$dhcp_lease_output" ]]; then
             print_status "PASS" "DHCP lease obtained recently"
-            [[ $VERBOSE -eq 1 ]] && echo "  Latest: $dhcp_lease"
+            [[ $VERBOSE -eq 1 ]] && echo "  Latest: $dhcp_lease_output"
         else
-            print_status "WARN" "No recent DHCP lease activity" "May be using static configuration"
+            print_status "WARN" "No recent DHCP lease activity" "May be using static configuration or requires sudo for journalctl access"
         fi
         
         # Check for DHCP errors
-        local dhcp_errors
-        dhcp_errors=$(journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "dhcp.*fail\|dhcp.*error" | wc -l)
+        local dhcp_errors_output
+        dhcp_errors_output=$(get_command_output "journalctl -u systemd-networkd --since '1 hour ago' --no-pager | grep -i 'dhcp.*fail\|dhcp.*error' | wc -l" 10)
         
-        if [[ $dhcp_errors -eq 0 ]]; then
+        if [[ -n "$dhcp_errors_output" ]] && [[ "$dhcp_errors_output" == "0" ]]; then
             print_status "PASS" "No recent DHCP errors"
+        elif [[ -n "$dhcp_errors_output" ]]; then
+            print_status "FAIL" "$dhcp_errors_output DHCP errors in the last hour"
         else
-            print_status "FAIL" "$dhcp_errors DHCP errors in the last hour"
+            print_status "INFO" "Cannot check DHCP errors" "Requires sudo privileges for journalctl access"
         fi
     fi
     
@@ -271,13 +355,15 @@ check_ipv6_status() {
     fi
     
     # Check for Router Advertisement processing
-    local ra_activity
-    ra_activity=$(journalctl -u systemd-networkd --since "1 hour ago" --no-pager | grep -i "router.*advertisement\|ndisc.*router" | wc -l)
+    local ra_activity_output
+    ra_activity_output=$(get_command_output "journalctl -u systemd-networkd --since '1 hour ago' --no-pager | grep -i 'router.*advertisement\|ndisc.*router' | wc -l" 10)
     
-    if [[ $ra_activity -gt 0 ]]; then
+    if [[ -n "$ra_activity_output" ]] && [[ "$ra_activity_output" != "0" ]]; then
         print_status "PASS" "Router Advertisement activity detected"
-    else
+    elif [[ -n "$ra_activity_output" ]]; then
         print_status "INFO" "No recent Router Advertisement activity" "Normal if network doesn't provide IPv6"
+    else
+        print_status "INFO" "Cannot check Router Advertisement activity" "Requires sudo privileges for journalctl access"
     fi
 }
 
@@ -371,10 +457,10 @@ check_network_configuration() {
             print_status "PASS" "Netplan configuration files found ($netplan_files files)"
             
             # Validate netplan configuration
-            if run_command "netplan generate" 5; then
+            if run_command_with_sudo_fallback "netplan generate" 5 "netplan validation"; then
                 print_status "PASS" "Netplan configuration is valid"
             else
-                print_status "FAIL" "Netplan configuration has errors"
+                print_status "FAIL" "Netplan configuration has errors or requires sudo privileges"
             fi
         else
             print_status "INFO" "No netplan configuration files found"
@@ -441,6 +527,9 @@ show_summary() {
         echo "3. For netplan issues:"
         echo "   sudo netplan try"
         echo "   sudo netplan apply"
+        echo ""
+        echo "4. For limited information due to permissions:"
+        echo "   Run this script with sudo for full access: sudo $0"
         exit 1
     fi
 }
@@ -465,6 +554,10 @@ This script performs comprehensive network health checks including:
 - Connectivity tests
 - DNS resolution tests
 - Network configuration validation
+
+Note: Some checks require sudo privileges for full access to system logs and services.
+The script will attempt to use sudo fallback where needed, but running with
+'sudo $0' provides the most comprehensive results.
 
 Exit codes:
     0 - All checks passed or only warnings
@@ -493,7 +586,10 @@ done
 
 # Check if running as root for some commands
 if [[ $EUID -ne 0 ]]; then
-    print_status "WARN" "Not running as root" "Some checks may have limited information"
+    print_status "INFO" "Not running as root" "Some checks will use sudo fallback where needed"
+    print_status "INFO" "For full access" "Run with 'sudo $0' or ensure sudo privileges are available"
+else
+    print_status "PASS" "Running as root" "Full access to all system information"
 fi
 
 # Main execution
