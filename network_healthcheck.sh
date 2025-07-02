@@ -325,17 +325,17 @@ check_connectivity() {
     ipv6_available=$(ip -6 addr show | grep -v "inet6 ::1\|inet6 fe80:" | grep -c "inet6" || echo "0")
     
     if [[ $ipv6_available -gt 0 ]]; then
-        # Test IPv6 connectivity using curl
-        if timeout 5 curl -s --connect-timeout 3 --max-time 5 http://[2001:4860:4860::8888] >/dev/null 2>&1; then
-            print_status "PASS" "IPv6 connectivity to Google DNS"
+        # Test IPv6 connectivity using nc (netcat) to DNS port
+        if command_exists nc; then
+            if timeout 5 nc -z -w 3 2001:4860:4860::8888 53 >/dev/null 2>&1; then
+                print_status "PASS" "IPv6 connectivity to Google DNS (DNS port)"
+            else
+                print_status "WARN" "IPv6 connectivity test failed" "May be normal if ISP doesn't provide IPv6"
+            fi
         else
-            # Fallback: test using nc (netcat) if available
-            if command_exists nc; then
-                if timeout 5 nc -z -w 3 2001:4860:4860::8888 53 >/dev/null 2>&1; then
-                    print_status "PASS" "IPv6 connectivity to Google DNS (DNS port)"
-                else
-                    print_status "WARN" "IPv6 connectivity test failed" "May be normal if ISP doesn't provide IPv6"
-                fi
+            # Fallback: test using curl to a known IPv6 HTTP service
+            if timeout 5 curl -6 -s --connect-timeout 3 --max-time 5 https://ipv6.google.com >/dev/null 2>&1; then
+                print_status "PASS" "IPv6 connectivity to Google (HTTP)"
             else
                 print_status "WARN" "IPv6 connectivity test failed" "May be normal if ISP doesn't provide IPv6"
             fi
