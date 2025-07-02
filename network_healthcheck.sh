@@ -82,7 +82,8 @@ check_systemd_networkd() {
     
     # Check for recent errors
     local recent_errors
-    recent_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "error\|fail\|could not" 2>/dev/null | tr -d '\n' || echo "0")
+    recent_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "error\|fail\|could not" 2>/dev/null || echo "0")
+    recent_errors=$(echo "$recent_errors" | xargs)
     
     if [[ "$recent_errors" == "0" ]]; then
         print_status "PASS" "No recent systemd-networkd errors"
@@ -94,7 +95,8 @@ check_systemd_networkd() {
     
     # Check for NDisc errors specifically
     local ndisc_errors
-    ndisc_errors=$(sudo journalctl -u systemd-networkd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "could not set ndisc route" 2>/dev/null | tr -d '\n' || echo "0")
+    ndisc_errors=$(sudo journalctl -u systemd-networkd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "could not set ndisc route" 2>/dev/null || echo "0")
+    ndisc_errors=$(echo "$ndisc_errors" | xargs)
     
     if [[ "$ndisc_errors" == "0" ]]; then
         print_status "PASS" "No recent NDisc route errors"
@@ -175,7 +177,8 @@ check_network_interfaces() {
     # Check for any failed interfaces
     if command_exists networkctl; then
         local failed_interfaces
-        failed_interfaces=$(sudo networkctl list 2>/dev/null | grep -c "failed" 2>/dev/null | tr -d '\n' || echo "0")
+        failed_interfaces=$(sudo networkctl list 2>/dev/null | grep -c "failed" 2>/dev/null || echo "0")
+        failed_interfaces=$(echo "$failed_interfaces" | xargs)
         if [[ "$failed_interfaces" == "0" ]]; then
             print_status "PASS" "No failed network interfaces"
         else
@@ -205,7 +208,8 @@ check_dhcp_status() {
         
         # Check for DHCP errors
         local dhcp_errors
-        dhcp_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "dhcp.*fail\|dhcp.*error" 2>/dev/null | tr -d '\n' || echo "0")
+        dhcp_errors=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "dhcp.*fail\|dhcp.*error" 2>/dev/null || echo "0")
+        dhcp_errors=$(echo "$dhcp_errors" | xargs)
         
         if [[ "$dhcp_errors" == "0" ]]; then
             print_status "PASS" "No recent DHCP errors"
@@ -274,7 +278,8 @@ check_ipv6_status() {
     
     # Check for Router Advertisement processing
     local ra_activity
-    ra_activity=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "router.*advertisement\|ndisc.*router" 2>/dev/null | tr -d '\n' || echo "0")
+    ra_activity=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -c "router.*advertisement\|ndisc.*router" 2>/dev/null || echo "0")
+    ra_activity=$(echo "$ra_activity" | xargs)
     
     if [[ "$ra_activity" != "0" ]]; then
         print_status "PASS" "Router Advertisement activity detected"
@@ -287,15 +292,15 @@ check_ipv6_status() {
 check_connectivity() {
     echo -e "\n${BLUE}=== Connectivity Tests ===${NC}"
     
-    # Test IPv4 connectivity
-    if run_command "ping -c 2 -W 5 8.8.8.8" 10; then
+    # Test IPv4 connectivity with shorter timeout
+    if timeout 8 ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
         print_status "PASS" "IPv4 connectivity to 8.8.8.8"
     else
         print_status "FAIL" "IPv4 connectivity test failed"
     fi
     
-    # Test IPv4 DNS resolution
-    if run_command "ping -c 2 -W 5 google.com" 10; then
+    # Test IPv4 DNS resolution with shorter timeout
+    if timeout 8 ping -c 1 -W 3 google.com >/dev/null 2>&1; then
         print_status "PASS" "IPv4 DNS resolution and connectivity"
     else
         print_status "FAIL" "IPv4 DNS resolution or connectivity failed"
@@ -306,13 +311,13 @@ check_connectivity() {
     ipv6_available=$(ip -6 addr show | grep -v "inet6 ::1\|inet6 fe80:" | grep -c "inet6" || echo "0")
     
     if [[ $ipv6_available -gt 0 ]]; then
-        if run_command "ping6 -c 2 -W 5 2001:4860:4860::8888" 10; then
+        if timeout 8 ping6 -c 1 -W 3 2001:4860:4860::8888 >/dev/null 2>&1; then
             print_status "PASS" "IPv6 connectivity to Google DNS"
         else
             print_status "WARN" "IPv6 connectivity test failed" "May be normal if ISP doesn't provide IPv6"
         fi
         
-        if run_command "ping6 -c 2 -W 5 ipv6.google.com" 10; then
+        if timeout 8 ping6 -c 1 -W 3 ipv6.google.com >/dev/null 2>&1; then
             print_status "PASS" "IPv6 DNS resolution and connectivity"
         else
             print_status "WARN" "IPv6 DNS resolution or connectivity failed"
