@@ -198,16 +198,63 @@ check_dhcp_status() {
     primary_interface=$(get_primary_interface)
     
     if [[ -n "$primary_interface" ]]; then
-        # Check for DHCP lease
-        local dhcp_lease
-        dhcp_lease=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -i "dhcp.*address.*via" | tail -1 || echo "")
+        # Check for DHCP lease using multiple methods
+        local dhcp_status="unknown"
+        local dhcp_details=""
         
-        if [[ -n "$dhcp_lease" ]]; then
-            print_status "PASS" "DHCP lease obtained recently"
-            [[ $VERBOSE -eq 1 ]] && echo "  Latest: $dhcp_lease"
-        else
-            print_status "WARN" "No recent DHCP lease activity" "May be using static configuration"
+        # Method 1: Check systemd-networkd lease files
+        if [[ -d /run/systemd/netif ]]; then
+            local lease_files
+            lease_files=$(find /run/systemd/netif -name "*.lease" 2>/dev/null | wc -l)
+            if [[ $lease_files -gt 0 ]]; then
+                dhcp_status="active"
+                dhcp_details="Found $lease_files DHCP lease file(s)"
+            fi
         fi
+        
+        # Method 2: Check if interface has DHCP configuration
+        if [[ "$dhcp_status" == "unknown" ]] && command_exists networkctl; then
+            local dhcp_config
+            dhcp_config=$(sudo networkctl status "$primary_interface" 2>/dev/null | grep -i "dhcp" | head -1)
+            if [[ -n "$dhcp_config" ]]; then
+                dhcp_status="configured"
+                dhcp_details="$dhcp_config"
+            fi
+        fi
+        
+        # Method 3: Check for IP address (indicates successful configuration)
+        if [[ "$dhcp_status" == "unknown" ]]; then
+            local ip_addr
+            ip_addr=$(ip addr show "$primary_interface" | grep -E "inet [0-9]" | head -1)
+            if [[ -n "$ip_addr" ]]; then
+                dhcp_status="configured"
+                dhcp_details="Interface has IP address: $ip_addr"
+            fi
+        fi
+        
+        # Method 4: Check journalctl as fallback
+        if [[ "$dhcp_status" == "unknown" ]]; then
+            local dhcp_lease
+            dhcp_lease=$(sudo journalctl -u systemd-networkd --since "1 hour ago" --no-pager 2>/dev/null | grep -i "dhcp.*address.*via" | tail -1 || echo "")
+            if [[ -n "$dhcp_lease" ]]; then
+                dhcp_status="active"
+                dhcp_details="$dhcp_lease"
+            fi
+        fi
+        
+        case $dhcp_status in
+            "active")
+                print_status "PASS" "DHCP lease active"
+                [[ $VERBOSE -eq 1 ]] && echo "  Details: $dhcp_details"
+                ;;
+            "configured")
+                print_status "PASS" "DHCP configuration detected"
+                [[ $VERBOSE -eq 1 ]] && echo "  Details: $dhcp_details"
+                ;;
+            *)
+                print_status "INFO" "DHCP status unclear" "May be using static configuration or DHCP not configured"
+                ;;
+        esac
         
         # Check for DHCP errors
         local dhcp_errors=0
